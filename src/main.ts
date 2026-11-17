@@ -154,10 +154,10 @@ async function bootstrap(): Promise<void> {
   app.enableShutdownHooks();
 
   // Escuchar únicamente en localhost durante desarrollo
-  await app.listen(port, '127.0.0.1');
+  await app.listen(port, '0.0.0.0');
 
   logger.log(
-    `Maracuya API disponible en http://127.0.0.1:${port}`,
+    `Maracuya API disponible en http://0.0.0.0:${port}`,
   );
 }
 
