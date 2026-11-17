@@ -1,0 +1,94 @@
+
+# ==========================================
+# MARACUYÁ BACKEND — GITIGNORE
+# NestJS + Node.js + TypeScript + PostgreSQL
+# Despliegue: Render
+# ==========================================
+
+# 1. Variables de entorno y secretos
+.env
+.env.*
+!.env.example
+!.env.sample
+
+*.secret
+*.secrets
+secrets/
+private/
+credentials/
+credentials.json
+service-account*.json
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+
+# 2. Certificados locales y credenciales
+certs/
+certificates/
+ssl/
+tls/
+*.crt
+*.cer
+
+# 3. Dependencias
+node_modules/
+.pnpm-store/
+.npm/
+.yarn/cache/
+.yarn/unplugged/
+
+# 4. Compilaciones y archivos generados
+dist/
+build/
+coverage/
+.nest/
+*.tsbuildinfo
+.tmp/
+temp/
+tmp/
+.cache/
+
+# 5. Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# 6. Archivos locales de pruebas
+*.local
+*.sqlite
+*.sqlite3
+*.db
+
+# 7. Archivos temporales de credenciales
+generar-hash-temporal.cjs
+*password*.txt
+*token*.txt
+*credential*.txt
+
+# 8. Configuración local del editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 9. Sistema operativo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 10. Archivos de respaldo
+*.bak
+*.backup
+*.old
+*.orig
+
+# 11. Archivos locales de Render
+.render/
+    
