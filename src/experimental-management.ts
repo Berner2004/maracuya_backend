@@ -1,6 +1,6 @@
 import {
   BadRequestException, Body, ConflictException, Controller, ForbiddenException,
-  Get, Injectable, NotFoundException, Param, Post, Req, UseGuards,
+  Get, Injectable, NotFoundException, Param, Post, Req, ServiceUnavailableException, UseGuards,
 } from '@nestjs/common';
 import type { Request } from 'express';
 import type { PoolClient } from 'pg';
@@ -32,6 +32,21 @@ const unidadSchema = z.object({
   repeticion: z.string().trim().min(1).max(80).nullable().optional(),
 }).strict();
 
+const loteTratamientoSchema = z.object({
+  tratamiento_id: uuid,
+  codigo_local: codigo,
+  referencia_validacion: z.string().trim().min(5).max(500),
+}).strict();
+
+function lotCatalogEnabled() {
+  return process.env.TRATAMIENTOS_LOTE_ACTIVO === 'true';
+}
+function requireLotCatalog() {
+  if (!lotCatalogEnabled()) {
+    throw new ServiceUnavailableException('El cat\u00e1logo por lote no est\u00e1 habilitado');
+  }
+}
+
 function parse<T>(schema: z.ZodType<T>, value: unknown): T {
   const r = schema.safeParse(value);
   if (!r.success) {
@@ -45,9 +60,11 @@ function authenticatedUser(req: Request & { userId?: string }): string {
 }
 function dbError(error: unknown): never {
   if (error instanceof BadRequestException || error instanceof ForbiddenException ||
-      error instanceof NotFoundException || error instanceof ConflictException) throw error;
+      error instanceof NotFoundException || error instanceof ConflictException ||
+      error instanceof ServiceUnavailableException) throw error;
   const pgCode = (error as {code?: string})?.code;
-  if (pgCode === '23505') throw new ConflictException('Ya existe un código igual dentro del proyecto');
+  if (pgCode === '42P01') throw new ServiceUnavailableException('Estructura experimental no disponible; revisa la activaci\u00f3n del cat\u00e1logo');
+  if (pgCode === '23505') throw new ConflictException('Ya existe un c\u00f3digo o una correspondencia equivalente en este contexto');
   if (['23503','23514','23502','22P02'].includes(pgCode ?? '')) {
     throw new BadRequestException('Datos incompatibles con las restricciones experimentales');
   }
@@ -130,19 +147,66 @@ export class ExperimentalManagementService {
     ).rows[0]);
   }
 
+  listLotTreatments(userId: string, projectId: string, lotId: string) {
+    const lot = parse(uuid, lotId);
+    return this.run(userId, projectId, false, async tx => {
+      requireLotCatalog();
+      const parent = await tx.query('SELECT id FROM public.lotes WHERE id=$1 AND proyecto_id=$2', [lot, projectId]);
+      if (!parent.rowCount) throw new NotFoundException('Lote inexistente en el proyecto');
+      return (await tx.query(
+        `SELECT tl.id,tl.proyecto_id,tl.lote_id,tl.tratamiento_id,tl.codigo_local,
+                tl.referencia_validacion,tl.creado_por,tl.creado_en,
+                t.codigo AS tratamiento_codigo,t.nombre,t.descripcion,t.es_control
+         FROM public.tratamientos_lote tl
+         JOIN public.tratamientos t ON t.id=tl.tratamiento_id AND t.proyecto_id=tl.proyecto_id
+         WHERE tl.proyecto_id=$1 AND tl.lote_id=$2 ORDER BY tl.codigo_normalizado,tl.id`,
+        [projectId, lot],
+      )).rows;
+    });
+  }
+
+  createLotTreatment(userId: string, projectId: string, lotId: string, body: unknown) {
+    const lot = parse(uuid, lotId);
+    const v = parse(loteTratamientoSchema, body);
+    return this.run(userId, projectId, true, async tx => {
+      requireLotCatalog();
+      const parents = await tx.query(
+        `SELECT
+          EXISTS (SELECT 1 FROM public.lotes WHERE id=$2 AND proyecto_id=$1) AS lote,
+          EXISTS (SELECT 1 FROM public.tratamientos WHERE id=$3 AND proyecto_id=$1) AS tratamiento`,
+        [projectId, lot, v.tratamiento_id],
+      );
+      if (!parents.rows[0]?.lote) throw new NotFoundException('Lote inexistente en el proyecto');
+      if (!parents.rows[0]?.tratamiento) throw new NotFoundException('Tratamiento inexistente en el proyecto');
+      // PostgreSQL resolves case-insensitive uniqueness, author and capture time.
+      return (await tx.query(
+        `INSERT INTO public.tratamientos_lote
+          (proyecto_id,lote_id,tratamiento_id,codigo_local,referencia_validacion)
+         VALUES ($1,$2,$3,$4,$5)
+         RETURNING id,proyecto_id,lote_id,tratamiento_id,codigo_local,
+                   referencia_validacion,creado_por,creado_en`,
+        [projectId, lot, v.tratamiento_id, v.codigo_local, v.referencia_validacion],
+      )).rows[0];
+    });
+  }
+
   listUnits(userId: string, projectId: string) {
-    return this.run(userId, projectId, false, async tx => (
-      await tx.query(
+    return this.run(userId, projectId, false, async tx => {
+      const scoped = lotCatalogEnabled();
+      return (await tx.query(
         `SELECT ue.id, ue.proyecto_id, ue.parcela_id, ue.tratamiento_id,
                 ue.codigo, ue.repeticion,
                 p.codigo AS parcela_codigo, t.codigo AS tratamiento_codigo
+                ${scoped ? ', p.lote_id, tl.id AS tratamiento_lote_id, tl.codigo_local, (tl.id IS NOT NULL) AS correspondencia_validada' : ''}
          FROM public.unidades_experimentales ue
          JOIN public.parcelas p ON p.id=ue.parcela_id AND p.proyecto_id=ue.proyecto_id
          JOIN public.tratamientos t ON t.id=ue.tratamiento_id AND t.proyecto_id=ue.proyecto_id
+         ${scoped ? `LEFT JOIN public.tratamientos_lote tl ON tl.proyecto_id=ue.proyecto_id
+                     AND tl.lote_id=p.lote_id AND tl.tratamiento_id=ue.tratamiento_id` : ''}
          WHERE ue.proyecto_id=$1 ORDER BY ue.codigo`,
         [projectId],
-      )
-    ).rows);
+      )).rows;
+    });
   }
 
   createUnit(userId: string, projectId: string, body: unknown) {
@@ -156,6 +220,17 @@ export class ExperimentalManagementService {
       );
       if (!parents.rows[0]?.parcela) throw new NotFoundException('Parcela inexistente en el proyecto');
       if (!parents.rows[0]?.tratamiento) throw new NotFoundException('Tratamiento inexistente en el proyecto');
+      if (lotCatalogEnabled()) {
+        const mapping = await tx.query(
+          `SELECT tl.id FROM public.tratamientos_lote tl
+           JOIN public.parcelas p ON p.proyecto_id=tl.proyecto_id AND p.lote_id=tl.lote_id
+           WHERE tl.proyecto_id=$1 AND p.id=$2 AND tl.tratamiento_id=$3`,
+          [projectId, v.parcela_id, v.tratamiento_id],
+        );
+        if (!mapping.rowCount) {
+          throw new BadRequestException('El tratamiento no tiene correspondencia revisada para el lote de la parcela');
+        }
+      }
       const duplicate = await tx.query(
         `SELECT id FROM public.unidades_experimentales
          WHERE proyecto_id=$1 AND parcela_id=$2 AND tratamiento_id=$3
@@ -197,6 +272,16 @@ export class ExperimentalManagementController {
   @Post('tratamientos')
   createTreatment(@Req() req: Request & {userId?: string}, @Param('id') id: string, @Body() body: unknown) {
     return this.service.createTreatment(authenticatedUser(req), id, body);
+  }
+
+  @Get('lotes/:lotId/tratamientos')
+  listLotTreatments(@Req() req: Request & {userId?: string}, @Param('id') id: string, @Param('lotId') lot: string) {
+    return this.service.listLotTreatments(authenticatedUser(req), id, lot);
+  }
+
+  @Post('lotes/:lotId/tratamientos')
+  createLotTreatment(@Req() req: Request & {userId?: string}, @Param('id') id: string, @Param('lotId') lot: string, @Body() body: unknown) {
+    return this.service.createLotTreatment(authenticatedUser(req), id, lot, body);
   }
 
   @Get('unidades-experimentales')

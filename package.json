@@ -6,7 +6,7 @@
     "start:dev": "nest start --watch",
     "build": "nest build",
     "start": "node dist/src/main.js",
-    "test": "npm run build && node --test tests/row-controls.test.cjs tests/registration-flows.test.cjs",
+    "test": "npm run build && node --test tests/row-controls.test.cjs tests/registration-flows.test.cjs tests/lot-treatments.test.cjs",
     "test:controls": "npm run build && node --test tests/row-controls.test.cjs",
     "check": "tsc --noEmit",
     "bootstrap": "tsx scripts/bootstrap-admin.ts"
